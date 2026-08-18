@@ -1,0 +1,31 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+    <f:section title="MCP OAuth 2.1 (Resource Server)">
+        <f:optionalBlock field="enabled" title="Enable OAuth enforcement for MCP HTTP endpoints">
+            <f:entry title="Trust upstream authentication (e.g. jwt-auth plugin)" field="trustUpstreamAuthentication">
+                <f:checkbox/>
+            </f:entry>
+            <f:entry title="Issuer URL" field="issuer">
+                <f:textbox/>
+            </f:entry>
+            <f:entry title="JWKS URI" field="jwksUri">
+                <f:textbox/>
+            </f:entry>
+            <f:entry title="Audience (resource URI)" field="audience">
+                <f:textbox/>
+            </f:entry>
+            <f:entry title="Authorization servers (one URL per line)" field="authorizationServersText">
+                <f:textarea/>
+            </f:entry>
+            <f:entry title="Required scopes (space separated)" field="requiredScopes">
+                <f:textbox/>
+            </f:entry>
+            <f:entry title="Username claim" field="usernameClaim">
+                <f:textbox/>
+            </f:entry>
+            <f:entry title="Groups claim" field="groupsClaim">
+                <f:textbox/>
+            </f:entry>
+        </f:optionalBlock>
+    </f:section>
+</j:jelly>

@@ -20,6 +20,10 @@ This MCP Server is based on the MCP Java SDK version 0.17.2, which implements th
 
 ## Getting Started
 
+### Prerequisites
+
+- Jenkins (version 2.533 or higher)
+
 ### Configuration
 
 The MCP Server plugin automatically sets up necessary endpoints and tools upon installation, requiring no additional configuration.
@@ -193,6 +197,75 @@ The MCP Server Plugin requires the same credentials as the Jenkins instance it's
 
 1. **Jenkins API Token**: Generate an API token from your Jenkins user account.
 2. **Basic Authentication**: Use the API token in the HTTP Basic Authentication header.
+
+### OAuth 2.1 (Resource Server) for MCP Endpoints
+
+In addition to Basic authentication, MCP HTTP endpoints can be protected using OAuth 2.1 bearer tokens.
+
+When OAuth enforcement is enabled, MCP endpoints require a valid `Authorization: Bearer <token>` header and the token is validated for:
+- Signature (JWKS)
+- Issuer (`iss`)
+- Audience (`aud`)
+- Time-based claims (`exp`, `nbf`)
+- Required scopes (`scope`/`scp`) when configured
+
+#### Configure OAuth 2.1 in Jenkins
+
+Go to **Manage Jenkins** -> **Configure System** -> **MCP OAuth 2.1 (Resource Server)** and configure:
+
+- Enable OAuth enforcement for MCP HTTP endpoints
+- Issuer URL
+- JWKS URI
+- Audience (resource URI)
+- Required scopes (optional)
+- Username claim / Groups claim (optional claim mapping)
+- Authorization servers (optional, one URL per line)
+
+#### Example JCasC block (OAuth)
+
+```yaml
+unclassified:
+  mcpOAuth:
+    enabled: true
+    trustUpstreamAuthentication: true
+    issuer: "https://idp.example.com"
+    jwksUri: "https://idp.example.com/.well-known/jwks.json"
+    audience: "${OIDC_CLIENT_ID}"
+    authorizationServers:
+      - "https://idp.example.com"
+    requiredScopes: "openid profile email"
+    usernameClaim: "sub"
+    groupsClaim: "groups"
+```
+
+Claim names and the audience format depend on your identity provider. For example, AD FS
+typically exposes JWKS at `/adfs/discovery/keys` and expects an audience of
+`microsoft:identityserver:<client-id>`.
+
+For environments using the `jwt-auth` plugin protected resource path, the MCP transport path is typically `mcp-server/mcp`.
+
+#### HTTPS requirement (with local/test exception)
+
+- `issuer` and `jwksUri` must use `https://` in non-local environments.
+- Local/test mode allows `http://` only for loopback hosts (`localhost`, `127.0.0.1`, `::1`).
+
+If non-HTTPS remote URLs are configured, OAuth requests are rejected at runtime.
+
+#### OAuth metadata discovery endpoint
+
+The plugin exposes RFC9728 protected resource metadata at:
+
+- `/.well-known/oauth-protected-resource`
+
+This endpoint is intentionally unauthenticated so clients can discover resource metadata and authorization servers.
+
+**Known limitation:** this plugin registers a Jenkins root action that claims the entire `.well-known/*` URL space. If you also install a plugin that publishes discovery endpoints under `.well-known/*` (for example [oidc-provider](https://plugins.jenkins.io/oidc-provider/)'s `openid-configuration` and `jwks`), only one plugin will win the dispatch slot for `.well-known`. In deployments that combine both, choose which plugin owns `.well-known/*` and disable OAuth resource-server enforcement in this plugin if oidc-provider must serve `.well-known/*` itself.
+
+#### Coexistence with the jwt-auth plugin
+
+If the [jwt-auth](https://plugins.jenkins.io/jwt-auth/) plugin (or any other upstream authenticator) already validates the bearer token and establishes the Jenkins `Authentication`, enable **Trust upstream authentication** in the MCP OAuth config. The MCP filter will then reuse the existing Jenkins identity instead of independently re-validating the JWT, avoiding double validation and identity divergence.
+
+If no non-anonymous upstream principal is present, MCP falls back to its own token validation as normal.
 
 #### Generate a personal access token
 To generate a personal access token:

@@ -26,12 +26,12 @@
 
 package io.jenkins.plugins.mcp.server.jackson;
 
-import tools.jackson.databind.module.SimpleModule;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 
 public class JenkinsExportedBeanModule extends SimpleModule {
 
     @Override
     public void setupModule(SetupContext context) {
-        context.addSerializerModifier(new JenkinsExportedBeanSerializerModifier());
+        context.addBeanSerializerModifier(new JenkinsExportedBeanSerializerModifier());
     }
 }

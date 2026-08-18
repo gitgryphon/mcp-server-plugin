@@ -26,6 +26,7 @@
 
 package io.jenkins.plugins.mcp.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.Extension;
@@ -33,11 +34,16 @@ import hudson.ExtensionComponent;
 import hudson.PluginWrapper;
 import hudson.model.RootAction;
 import hudson.security.csrf.CrumbExclusion;
+import io.jenkins.plugins.mcp.server.auth.McpBearerTokenValidator;
+import io.jenkins.plugins.mcp.server.auth.McpJwtAuthenticationMapper;
+import io.jenkins.plugins.mcp.server.auth.McpOAuthConfiguration;
+import io.jenkins.plugins.mcp.server.auth.OAuthProtectedResourceMetadataEndpoint;
+import io.jenkins.plugins.mcp.server.auth.TokenValidationResult;
 import io.jenkins.plugins.mcp.server.annotation.Tool;
 import io.jenkins.plugins.mcp.server.tool.McpToolWrapper;
 import io.modelcontextprotocol.common.McpTransportContext;
-import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper;
-import io.modelcontextprotocol.json.schema.jackson3.DefaultJsonSchemaValidator;
+import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper;
+import io.modelcontextprotocol.json.schema.jackson2.DefaultJsonSchemaValidator;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.server.McpStatelessServerFeatures;
@@ -70,6 +76,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import hudson.security.ACL;
 import jenkins.model.Jenkins;
 import jenkins.util.HttpServletFilter;
 import jenkins.util.SystemProperties;
@@ -77,7 +84,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.kohsuke.accmod.Restricted;
 import org.kohsuke.accmod.restrictions.NoExternalUse;
-import tools.jackson.databind.json.JsonMapper;
+import org.springframework.security.core.Authentication;
 
 /**
  *
@@ -120,6 +127,8 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
     public static final String METRICS_ENDPOINT = "/metrics";
 
     public static final String MCP_SERVER_METRICS = MCP_SERVER + METRICS_ENDPOINT;
+    public static final String OAUTH_PROTECTED_RESOURCE_ENDPOINT = "/.well-known/oauth-protected-resource";
+    private static final String AUTHORIZATION_HEADER = "Authorization";
     public static final String AUTHENTICATION = Endpoint.class.getName() + ".authentication";
     public static final String HTTP_SERVLET_REQUEST = Endpoint.class.getName() + ".httpServletRequest";
 
@@ -176,6 +185,14 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
     public static boolean DISABLE_MCP_STREAMABLE =
             SystemProperties.getBoolean(Endpoint.class.getName() + ".disableMcpStreamable", false);
 
+        /**
+         * Force OAuth gate for MCP endpoints regardless of persisted configuration.
+         * Validation still requires complete OAuth settings (issuer, jwksUri, audience).
+         */
+        @SuppressFBWarnings(value = "MS_SHOULD_BE_FINAL", justification = "Accessible via System Groovy Scripts")
+        public static boolean FORCE_OAUTH_ENFORCEMENT =
+            SystemProperties.getBoolean(Endpoint.class.getName() + ".forceOAuthEnforcement", false);
+
     /**
      * Maximum time in seconds to wait for an SSE message to be processed before
      * releasing the Jetty handler thread. The MCP Java SDK's
@@ -200,7 +217,7 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
     /**
      * JSON object mapper for serialization/deserialization
      */
-    private final JsonMapper objectMapper = new JsonMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * Package hosting the built-in tool extensions shipped with this plugin.
@@ -240,9 +257,20 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
 
         String requestedResource = getRequestedResourcePath(request);
 
+        // RFC9728 protected resource metadata endpoint for OAuth discovery.
+        if (requestedResource.equals(OAUTH_PROTECTED_RESOURCE_ENDPOINT)
+                && request.getMethod().equalsIgnoreCase("GET")) {
+            OAuthProtectedResourceMetadataEndpoint.handleMetadataRequest(response);
+            return true;
+        }
+
         if (!requestedResource.startsWith("/" + MCP_SERVER)) {
             // Not a MCP server request, continue the filter chain
             return false;
+        }
+
+        if (!enforceOAuth(request, response)) {
+            return true;
         }
 
         if (!initialized) {
@@ -292,6 +320,184 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
         }
 
         return false;
+    }
+
+    private static boolean isOAuthEnforcedForMcp() {
+        return FORCE_OAUTH_ENFORCEMENT || McpOAuthConfiguration.get().isEnabled();
+    }
+
+    private static boolean hasBearerAuthorization(HttpServletRequest request) {
+        String header = request.getHeader(AUTHORIZATION_HEADER);
+        return header != null && StringUtils.startsWithIgnoreCase(header, "Bearer ") && header.length() > 7;
+    }
+
+    private static String extractBearerToken(HttpServletRequest request) {
+        String header = request.getHeader(AUTHORIZATION_HEADER);
+        if (header == null || !StringUtils.startsWithIgnoreCase(header, "Bearer ")) {
+            return null;
+        }
+        String token = header.substring(7).trim();
+        return token.isEmpty() ? null : token;
+    }
+
+    private static boolean enforceOAuth(HttpServletRequest request, HttpServletResponse response) throws IOException {
+        if (!isOAuthEnforcedForMcp()) {
+            return true;
+        }
+
+        String token = extractBearerToken(request);
+        if (token == null) {
+            sendOAuthUnauthorized(request, response, "invalid_token", "Bearer token required", null);
+            return false;
+        }
+
+        McpOAuthConfiguration configuration = McpOAuthConfiguration.get();
+
+        // Trust upstream authentication (e.g. jwt-auth plugin) if enabled and the request
+        // already carries a non-anonymous authenticated principal. This avoids double
+        // validation and identity divergence with peer plugins.
+        if (configuration.isTrustUpstreamAuthentication() && hasAuthenticatedUpstreamPrincipal()) {
+            return true;
+        }
+
+        String expectedAudience = resolveExpectedAudience(request, configuration);
+        TokenValidationResult validation = McpBearerTokenValidator.validate(token, configuration, expectedAudience);
+        boolean allowed = applyValidationResult(request, response, validation);
+        if (!allowed) {
+            return false;
+        }
+
+        Authentication authentication = McpJwtAuthenticationMapper.fromValidatedToken(token, configuration);
+        if (authentication != null) {
+            request.setAttribute(AUTHENTICATION, authentication);
+        }
+        return true;
+    }
+
+    private static boolean hasAuthenticatedUpstreamPrincipal() {
+        Authentication current = Jenkins.getAuthentication2();
+        if (current == null || !current.isAuthenticated()) {
+            return false;
+        }
+        return !ACL.SYSTEM2.equals(current) && !Jenkins.ANONYMOUS2.equals(current);
+    }
+
+    private static boolean applyValidationResult(
+            HttpServletRequest request, HttpServletResponse response, TokenValidationResult result) throws IOException {
+        return switch (result.decision()) {
+            case ALLOW -> true;
+            case UNAUTHORIZED -> {
+                sendOAuthUnauthorized(request, response, result.error(), result.errorDescription(), null);
+                yield false;
+            }
+            case FORBIDDEN -> {
+                sendOAuthForbidden(request, response, result.error(), result.errorDescription(), result.requiredScope());
+                yield false;
+            }
+            case SERVER_ERROR -> {
+                response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                response.setContentType("application/json;charset=UTF-8");
+                response.getWriter().write("{\"error\":\"server_error\",\"error_description\":\""
+                        + escapeJson(result.errorDescription())
+                        + "\"}");
+                response.getWriter().flush();
+                yield false;
+            }
+        };
+    }
+
+    private static String resolveExpectedAudience(HttpServletRequest request, McpOAuthConfiguration configuration) {
+        String configuredAudience = StringUtils.trimToNull(configuration.getAudience());
+        if (configuredAudience != null) {
+            return configuredAudience;
+        }
+        String requestUrl = request.getRequestURL().toString();
+        String requestUri = request.getRequestURI();
+        String origin = requestUrl.endsWith(requestUri)
+                ? requestUrl.substring(0, requestUrl.length() - requestUri.length())
+                : requestUrl;
+        return origin + request.getContextPath() + "/" + MCP_SERVER_STREAMABLE;
+    }
+
+    private static void sendOAuthUnauthorized(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            String error,
+            String description,
+            String scope)
+            throws IOException {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType("application/json;charset=UTF-8");
+
+        String requestUrl = request.getRequestURL().toString();
+        String requestUri = request.getRequestURI();
+        String origin;
+        if (requestUrl.endsWith(requestUri)) {
+            origin = requestUrl.substring(0, requestUrl.length() - requestUri.length());
+        } else {
+            origin = requestUrl;
+        }
+        String metadataUrl = origin + request.getContextPath() + OAUTH_PROTECTED_RESOURCE_ENDPOINT;
+
+        response.setHeader("WWW-Authenticate", buildWwwAuthenticate(metadataUrl, error, description, scope));
+        response.getWriter().write("{\"error\":\""
+                + escapeJson(StringUtils.defaultIfBlank(error, "invalid_token"))
+                + "\",\"error_description\":\""
+                + escapeJson(StringUtils.defaultIfBlank(description, "Unauthorized"))
+                + "\"}");
+        response.getWriter().flush();
+    }
+
+    private static void sendOAuthForbidden(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            String error,
+            String description,
+            String scope)
+            throws IOException {
+        response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+        response.setContentType("application/json;charset=UTF-8");
+
+        String requestUrl = request.getRequestURL().toString();
+        String requestUri = request.getRequestURI();
+        String origin = requestUrl.endsWith(requestUri)
+                ? requestUrl.substring(0, requestUrl.length() - requestUri.length())
+                : requestUrl;
+        String metadataUrl = origin + request.getContextPath() + OAUTH_PROTECTED_RESOURCE_ENDPOINT;
+
+        response.setHeader("WWW-Authenticate", buildWwwAuthenticate(metadataUrl, error, description, scope));
+        response.getWriter().write("{\"error\":\""
+                + escapeJson(StringUtils.defaultIfBlank(error, "forbidden"))
+                + "\",\"error_description\":\""
+                + escapeJson(StringUtils.defaultIfBlank(description, "Forbidden"))
+                + "\"}");
+        response.getWriter().flush();
+    }
+
+    private static String buildWwwAuthenticate(String metadataUrl, String error, String description, String scope) {
+        StringBuilder value = new StringBuilder();
+        value.append("Bearer realm=\"jenkins-mcp\"");
+        value.append(", resource_metadata=\"").append(metadataUrl).append("\"");
+        if (StringUtils.isNotBlank(error)) {
+            value.append(", error=\"").append(escapeHeaderValue(error)).append("\"");
+        }
+        if (StringUtils.isNotBlank(description)) {
+            value.append(", error_description=\"")
+                    .append(escapeHeaderValue(description))
+                    .append("\"");
+        }
+        if (StringUtils.isNotBlank(scope)) {
+            value.append(", scope=\"").append(escapeHeaderValue(scope)).append("\"");
+        }
+        return value.toString();
+    }
+
+    private static String escapeHeaderValue(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static String escapeJson(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     protected synchronized void init() throws ServletException {
@@ -496,7 +702,7 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
             Method method,
             McpServerFeatures.SyncToolSpecification spec,
             String description) {
-        McpToolWrapper newWrapper(JsonMapper objectMapper) {
+        McpToolWrapper newWrapper(ObjectMapper objectMapper) {
             return new McpToolWrapper(objectMapper, extension, method);
         }
     }
@@ -634,8 +840,19 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
 
     @Override
     public boolean handle(HttpServletRequest req, HttpServletResponse resp) throws IOException, ServletException {
+        // Only handle requests targeting MCP server endpoints. All other Jenkins URLs
+        // (e.g. /login, /whoAmI) must fall through to the normal Jenkins pipeline.
+        String requestedResource = getRequestedResourcePath(req);
+        if (!requestedResource.startsWith("/" + MCP_SERVER)) {
+            return false;
+        }
+
         if (!initialized) {
             init();
+        }
+
+        if (!enforceOAuth(req, resp)) {
+            return true;
         }
 
         // Note: health endpoint is handled by HealthEndpoint UnprotectedRootAction at /mcp-health
@@ -951,7 +1168,11 @@ public class Endpoint extends CrumbExclusion implements RootAction, HttpServletF
 
     private static void prepareMcpContext(HttpServletRequest request) {
         Map<String, Object> contextMap = new HashMap<>();
-        contextMap.put(AUTHENTICATION, Jenkins.getAuthentication2());
+        Authentication auth = (Authentication) request.getAttribute(AUTHENTICATION);
+        if (auth == null) {
+            auth = Jenkins.getAuthentication2();
+        }
+        contextMap.put(AUTHENTICATION, auth);
         contextMap.put(HTTP_SERVLET_REQUEST, request);
         request.setAttribute(MCP_CONTEXT_KEY, McpTransportContext.create(contextMap));
     }

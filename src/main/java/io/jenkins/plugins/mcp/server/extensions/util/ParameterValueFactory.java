@@ -36,6 +36,7 @@ import hudson.model.RunParameterDefinition;
 import hudson.model.StringParameterDefinition;
 import hudson.model.TextParameterDefinition;
 import java.util.List;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -49,6 +50,8 @@ public final class ParameterValueFactory {
             "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition";
     public static final String LIST_GIT_BRANCHES_PARAMETER_DEFINITION =
             "com.syhuang.hudson.plugins.listgitbranchesparameter.ListGitBranchesParameterDefinition";
+    public static final String EXTENDED_CHOICE_PARAMETER_DEFINITION =
+            "com.cwctravel.hudson.plugins.extended_choice_parameter.ExtendedChoiceParameterDefinition";
     public static final String VALIDATING_STRING_PARAMETER_DEFINITION =
             "hudson.plugins.validating_string_parameter.ValidatingStringParameterDefinition";
 
@@ -66,6 +69,8 @@ public final class ParameterValueFactory {
                 return createGitParameterValue(param, inputValue);
             } else if (isParameterDefinitionOf(param, LIST_GIT_BRANCHES_PARAMETER_DEFINITION)) {
                 return createListGitBranchesParameterValue(param, inputValue);
+            } else if (isParameterDefinitionOf(param, EXTENDED_CHOICE_PARAMETER_DEFINITION)) {
+                return createExtendedChoiceParameterValue(param, inputValue);
             } else if (isParameterDefinitionOf(param, VALIDATING_STRING_PARAMETER_DEFINITION)) {
                 return createParameterValueViaCli(param, String.valueOf(inputValue));
             } else if (param instanceof StringParameterDefinition) {
@@ -183,6 +188,16 @@ public final class ParameterValueFactory {
 
     private static ParameterValue createListGitBranchesParameterValue(ParameterDefinition param, Object inputValue) {
         return createParameterValueViaCli(param, String.valueOf(inputValue));
+    }
+
+    private static ParameterValue createExtendedChoiceParameterValue(ParameterDefinition param, Object inputValue) {
+        String valuesAsString;
+        if (inputValue instanceof List<?> l) {
+            valuesAsString = l.stream().map(Object::toString).collect(Collectors.joining(","));
+        } else {
+            valuesAsString = String.valueOf(inputValue);
+        }
+        return createParameterValueViaCli(param, valuesAsString);
     }
 
     private static ParameterValue createParameterValueViaCli(ParameterDefinition param, String inputValue) {

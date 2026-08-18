@@ -125,13 +125,13 @@ class DefaultMcpServerTest {
         var nextNumber = project.getNextBuildNumber();
         try (var client = jenkinsMcpClientBuilder
                 .jenkins(jenkins)
-                .requestCustomizer((builder, method, endpoint, body, context) -> {
+                .requestCustomizer(request -> {
                     if (runAsAdmin) {
                         String username = "admin";
                         String password = "admin";
                         String authString = username + ":" + password;
                         String encodedAuth = Base64.getEncoder().encodeToString(authString.getBytes());
-                        builder.setHeader("Authorization", "Basic " + encodedAuth);
+                        request.setHeader("Authorization", "Basic " + encodedAuth);
                     }
                 })
                 .build()) {
@@ -284,8 +284,7 @@ class DefaultMcpServerTest {
         String encodedAuth = Base64.getEncoder().encodeToString(authString.getBytes());
         try (var client = jenkinsMcpClientBuilder
                 .jenkins(jenkins)
-                .requestCustomizer((builder, method, endpoint, body, context) ->
-                        builder.setHeader("Authorization", "Basic " + encodedAuth))
+                .requestCustomizer(request -> request.setHeader("Authorization", "Basic " + encodedAuth))
                 .build()) {
             {
                 McpSchema.CallToolRequest request =
@@ -336,13 +335,13 @@ class DefaultMcpServerTest {
         }
         try (var client = jenkinsMcpClientBuilder
                 .jenkins(jenkins)
-                .requestCustomizer((builder, method, endpoint, body, context) -> {
+                .requestCustomizer(request -> {
                     if (enableSecurity) {
                         String username = "admin";
                         String password = "admin";
                         String authString = username + ":" + password;
                         String encodedAuth = Base64.getEncoder().encodeToString(authString.getBytes());
-                        builder.setHeader("Authorization", "Basic " + encodedAuth);
+                        request.setHeader("Authorization", "Basic " + encodedAuth);
                     }
                 })
                 .build()) {
@@ -380,8 +379,7 @@ class DefaultMcpServerTest {
         String encodedAuth = Base64.getEncoder().encodeToString(authString.getBytes());
         try (var client = jenkinsMcpClientBuilder
                 .jenkins(jenkins)
-                .requestCustomizer((builder, method, endpoint, body, context) ->
-                        builder.setHeader("Authorization", "Basic " + encodedAuth))
+                .requestCustomizer(request -> request.setHeader("Authorization", "Basic " + encodedAuth))
                 .build()) {
             {
                 McpSchema.CallToolRequest request = new McpSchema.CallToolRequest("getStatus", Map.of());

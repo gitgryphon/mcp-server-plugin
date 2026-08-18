@@ -37,8 +37,7 @@ public class OriginHeaderValidationTest {
                         // as it fail because of 403 we set a short timeout
                         // to avoid waiting the default 300 seconds
                         .requestTimeoutSeconds(10)
-                        .requestCustomizer((builder, method, endpoint, body, context) ->
-                                builder.header("Origin", "http://foo-bar-beer.com"))
+                        .requestCustomizer(requestBuilder -> requestBuilder.header("Origin", "http://foo-bar-beer.com"))
                         .build());
     }
 
@@ -53,7 +52,7 @@ public class OriginHeaderValidationTest {
                 // as it fail because of 403 we set a short timeout
                 // to avoid waiting the default 300 seconds
                 .requestTimeoutSeconds(10)
-                .requestCustomizer((builder, method, endpoint, body, context) -> builder.header("Origin", jenkinsUrl))
+                .requestCustomizer(requestBuilder -> requestBuilder.header("Origin", jenkinsUrl))
                 .build()) {
             var tools = client.listTools().tools();
             Assertions.assertThat(tools).isNotEmpty();
